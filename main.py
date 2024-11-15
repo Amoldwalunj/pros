@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from flask_cors import cross_origin
-from models import db, Recording
+from models import db, Recording, AssignedWorker, User, UserRole
 from datetime import datetime, timedelta
 import requests
 import boto3
@@ -14,7 +14,7 @@ import re
 import os
 import uuid
 import json
-from dotenv import load_dotenv
+
 
 
 load_dotenv()
@@ -22,24 +22,14 @@ load_dotenv()
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Database credentials
-DB_HOST = os.getenv('DB_HOST')
-DB_USER = os.getenv('DB_USER') 
-DB_PASSWORD = os.getenv('DB_PASSWORD')
-DB_NAME = os.getenv('DB_NAME')
-
-# AWS credentials
-REGION_NAME = os.getenv('REGION_NAME')
-ACCESS_KEY = os.getenv('ACCESS_KEY')
-SECRET_KEY = os.getenv('SECRET_KEY')
-BUCKET_NAME = os.getenv('BUCKET_NAME')
-OUTPUT_BUCKET_NAME = os.getenv('OUTPUT_BUCKET_NAME')
-ROLE_ARN = os.getenv('ROLE_ARN')
-
 
 app = Flask(__name__)
 
-
+# Database credentials
+DB_HOST = os.getenv('DB_HOST')
+DB_USER = os.getenv('DB_USER')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
+DB_NAME = os.getenv('DB_NAME')
 
 # Construct the database URI
 app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}'
@@ -56,13 +46,100 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 db.init_app(app)
 with app.app_context():
     db.create_all() 
-    
+
+ 
+# AWS credentials
+REGION_NAME = os.getenv('REGION_NAME')
+ACCESS_KEY = os.getenv('ACCESS_KEY')
+SECRET_KEY = os.getenv('SECRET_KEY')
+BUCKET_NAME = os.getenv('BUCKET_NAME')
+OUTPUT_BUCKET_NAME = os.getenv('OUTPUT_BUCKET_NAME')
+ROLE_ARN = os.getenv('ROLE_ARN')
+
+
+s3_client = boto3.client('s3', aws_access_key_id=ACCESS_KEY, aws_secret_access_key=SECRET_KEY, region_name=REGION_NAME)
+transcribe_client = boto3.client('transcribe', aws_access_key_id=ACCESS_KEY, aws_secret_access_key=SECRET_KEY, region_name=REGION_NAME)
 
 
 
 def transform_name(name):
     # Replace spaces and non-compliant characters with underscores
     return re.sub(r'[^0-9a-zA-Z._-]', '_', name)
+
+
+@app.route('/login', methods=['POST'])
+@cross_origin()
+def login():
+    logger.info("Received login request.")
+    
+    # Parse JSON data from the request
+    if not request.json:
+        logger.error("No JSON data provided in the request.")
+        return jsonify({'error': 'Please provide login details in JSON format.'}), 400
+    
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+
+    # Check if email and password are provided
+    if not email or not password:
+        logger.error("Email or password is missing.")
+        return jsonify({'error': 'Email and password are required.'}), 400
+
+    try:
+        # Check if user exists
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            logger.error(f"No user found with email: {email}")
+            return jsonify({'error': 'Invalid email or password.'}), 401
+        
+        # Verify password (replace with actual hashed password verification in production)
+        if user.password != password:  # Replace with a secure password verification
+            logger.error("Password verification failed.")
+            return jsonify({'error': 'Invalid email or password.'}), 401
+
+        logger.info(f"User {user.email} logged in successfully.")
+        return jsonify({
+            'message': 'Login successful',
+            'user': {
+                'id': user.user_id,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'role': user.role.value
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"An error occurred during login: {e}")
+        return jsonify({'error': 'An error occurred. Please try again later.'}), 500
+    
+
+@app.route('/workers', methods=['GET'])
+@cross_origin()
+def get_all_workers():
+    logger.info("Received request to fetch all workers.")
+    try:
+        # Query all users with role 'worker'
+        workers = User.query.filter_by(role=UserRole.WORKER).all()
+        if not workers:
+            logger.info("No workers found.")
+            return jsonify({'message': 'No workers found.'}), 404
+        # Format the worker data into JSON-serializable format
+        worker_list = [
+            {
+                'user_id': worker.user_id,
+                'first_name': worker.first_name,
+                'last_name': worker.last_name,
+                'email': worker.email,
+                'role': worker.role.value
+            }
+            for worker in workers
+        ]
+        logger.info(f"Fetched {len(worker_list)} workers.")
+        return jsonify({'workers': worker_list}), 200
+    except Exception as e:
+        logger.error(f"An error occurred while fetching workers: {e}")
+        return jsonify({'error': 'An error occurred. Please try again later.'}), 500
 
 
 @app.route('/upload_healthscribe', methods=['POST'])
@@ -278,6 +355,7 @@ def get_recordings():
     # Get filter parameters from query string
     date = request.args.get('date')  # Expected values: 'month', 'seven_days', 'today'
     validated = request.args.get('validated')  # Expected as 'true' or 'false'
+    assigned_worker = request.args.get('assigned_worker')  # Expected as worker name or ID
     # Initialize the base query
     query = Recording.query
     # Apply 'updated_at' filter based on keyword
@@ -305,6 +383,19 @@ def get_recordings():
             query = query.filter(Recording.validated == False)
         else:
             return jsonify({'error': 'Invalid value for validated. Use true or false.'}), 400
+        
+    # Apply 'assigned_worker' filter if provided (by name or ID)
+    if assigned_worker:
+        # Check if assigned_worker is an ID (if it's numeric, assume it's an ID)
+        if assigned_worker.isdigit():
+            # Filter by assigned_worker ID
+            worker_id = int(assigned_worker)
+            query = query.filter(Recording.assigned_to == worker_id)
+        else:
+            # Filter by worker's name (first_name and last_name)
+            query = query.join(AssignedWorker).join(User).filter(
+                (User.first_name + ' ' + User.last_name).ilike(f"%{assigned_worker}%")
+            )
 
     # Execute the query and fetch results
     recordings = query.all()
@@ -327,6 +418,7 @@ def get_recordings():
     ]
     return jsonify({'status': 'success', 'data': results})
 
+
 @app.route('/generate_presigned_url/<int:recording_id>', methods=['GET'])
 def generate_presigned_url(recording_id):
     # Fetch the recording from the database
@@ -334,10 +426,10 @@ def generate_presigned_url(recording_id):
     
     if not recording:
         return jsonify({'message': 'Recording not found'}), 404
- 
+
     # Get the S3 path from the recording
     s3_path = recording.s3_path
- 
+
     try:
         # Generate a presigned URL for the S3 object
         presigned_url = s3_client.generate_presigned_url(
@@ -354,7 +446,46 @@ def generate_presigned_url(recording_id):
         }), 200
     except Exception as e:
         return jsonify({'message': f'Error generating presigned URL: {str(e)}'}), 500
+    
+
+@app.route('/recordings/count', methods=['GET'])
+def get_recording_counts():
+    # Get filters from the query string (optional)
+    date = request.args.get('date')  # Optionally filter by date, e.g., 'month', 'seven_days', 'today'
+    # Initialize the base query for Recording
+    query = Recording.query
+    # Apply date filter if provided
+    if date:
+        now = datetime.utcnow()
+        if date == 'month':
+            start_date = now - timedelta(days=30)
+        elif date == 'seven_days':
+            start_date = now - timedelta(days=7)
+        elif date == 'today':
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            return jsonify({'error': 'Invalid value for date filter. Use month, seven_days, or today.'}), 400
+        query = query.filter(Recording.updated_at >= start_date)
+    # Count total number of recordings
+    total_recordings = query.count()
+    # Count of recordings assigned to a worker
+    assigned_recordings = query.filter(Recording.assigned_to.isnot(None)).count()
+    # Count of unassigned recordings
+    unassigned_recordings = query.filter(Recording.assigned_to.is_(None)).count()
+    # Count of validated recordings
+    validated_recordings = query.filter(Recording.validated == True).count()
+    # Return the counts in a JSON response
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'total_recordings': total_recordings,
+            'assigned_recordings': assigned_recordings,
+            'unassigned_recordings': unassigned_recordings,
+            'validated_recordings': validated_recordings
+        }
+    })
+
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=8005)
+    app.run(debug=True, host='0.0.0.0', port=8004)
