@@ -1,5 +1,6 @@
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
+from sqlalchemy.dialects.mysql import LONGTEXT
 from enum import Enum
 
 db = SQLAlchemy()
@@ -36,7 +37,7 @@ class Recording(db.Model):
     transformed_file_name = db.Column(db.String(255))
     transcription = db.Column(db.Text)
     visit_notes = db.Column(db.Text)
-    icd_codes = db.Column(db.Text)  # Consider using a separate table if ICD codes are multiple and need normalization
+    icd_codes = db.Column(LONGTEXT) 
     status = db.Column(db.String(50), default='unassigned', index=True)
     
     # Foreign key to AssignedWorker model
