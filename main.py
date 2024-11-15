@@ -6,6 +6,7 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from flask_cors import cross_origin
 from models import db, Recording, AssignedWorker, User, UserRole
+from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import requests
 import boto3
@@ -46,8 +47,8 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 db.init_app(app)
 with app.app_context():
     db.create_all() 
-
- 
+    
+    
 # AWS credentials
 REGION_NAME = os.getenv('REGION_NAME')
 ACCESS_KEY = os.getenv('ACCESS_KEY')
@@ -65,6 +66,56 @@ transcribe_client = boto3.client('transcribe', aws_access_key_id=ACCESS_KEY, aws
 def transform_name(name):
     # Replace spaces and non-compliant characters with underscores
     return re.sub(r'[^0-9a-zA-Z._-]', '_', name)
+
+
+def assign_reports_to_workers():
+    with app.app_context():
+        # Find unassigned and unverified reports where assigned_to is NULL
+        unassigned_reports = Recording.query.filter_by(status='unassigned', validated=False, assigned_to=None).all()
+        workers = User.query.filter_by(role=UserRole.WORKER).all()
+        
+        # Print the number of unassigned reports and workers
+        print(f"Found {len(unassigned_reports)} unassigned reports.")
+        print(f"Found {len(workers)} workers available.")
+        
+        # Calculate how many reports each worker should get
+        num_workers = len(workers)
+        if num_workers == 0:
+            print("No workers available to assign reports.")
+            return  # No workers available to assign reports
+        
+        # Distribute the reports equally among all workers
+        for index, report in enumerate(unassigned_reports):
+            worker = workers[index % num_workers]  # Distribute reports cyclically among workers
+            
+            # Print information about the worker and report being assigned
+            print(f"Assigning report {report.recording_id} to worker {worker.first_name} {worker.last_name}.")
+            
+            # Check if the worker already has an assignment entry
+            assigned_worker = AssignedWorker.query.filter_by(user_id=worker.user_id).first()
+            
+            if not assigned_worker:
+                # Create an entry in the AssignedWorker table if it doesn't exist
+                print(f"Creating a new AssignedWorker entry for {worker.first_name} {worker.last_name}.")
+                assigned_worker = AssignedWorker(user_id=worker.user_id)
+                db.session.add(assigned_worker)
+                db.session.commit()
+            
+            # Ensure worker has capacity to take more assignments
+            if assigned_worker and assigned_worker.current_assignments < assigned_worker.max_assignments:
+                print(f"Worker {worker.first_name} {worker.last_name} has capacity. Assigning report.")
+                report.status = 'assigned'
+                report.assigned_to = assigned_worker.assigned_id
+                assigned_worker.current_assignments += 1
+                db.session.commit()
+            else:
+                # If the worker has reached max assignments, print a message
+                print(f"Worker {worker.first_name} {worker.last_name} has reached max assignments.")
+
+                
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=assign_reports_to_workers, trigger="interval", minutes=10)
+scheduler.start()
 
 
 @app.route('/login', methods=['POST'])
@@ -407,7 +458,6 @@ def get_recordings():
             'transformed_file_name': recording.transformed_file_name,
             'transcription': recording.transcription,
             'visit_notes': recording.visit_notes,
-            'icd_codes': recording.icd_codes,
             'status': recording.status,
             'assigned_to': recording.assigned_to,
             'validated': recording.validated,
@@ -452,8 +502,11 @@ def generate_presigned_url(recording_id):
 def get_recording_counts():
     # Get filters from the query string (optional)
     date = request.args.get('date')  # Optionally filter by date, e.g., 'month', 'seven_days', 'today'
+    worker_id = request.args.get('worker_id', type=int)  # Optionally filter by worker ID
+    
     # Initialize the base query for Recording
     query = Recording.query
+    
     # Apply date filter if provided
     if date:
         now = datetime.utcnow()
@@ -466,6 +519,11 @@ def get_recording_counts():
         else:
             return jsonify({'error': 'Invalid value for date filter. Use month, seven_days, or today.'}), 400
         query = query.filter(Recording.updated_at >= start_date)
+
+    # Apply worker filter if provided
+    if worker_id:
+        query = query.filter(Recording.assigned_to == worker_id)
+    
     # Count total number of recordings
     total_recordings = query.count()
     # Count of recordings assigned to a worker
@@ -474,6 +532,7 @@ def get_recording_counts():
     unassigned_recordings = query.filter(Recording.assigned_to.is_(None)).count()
     # Count of validated recordings
     validated_recordings = query.filter(Recording.validated == True).count()
+
     # Return the counts in a JSON response
     return jsonify({
         'status': 'success',
@@ -484,6 +543,7 @@ def get_recording_counts():
             'validated_recordings': validated_recordings
         }
     })
+
 
 
 
