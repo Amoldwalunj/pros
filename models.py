@@ -45,7 +45,8 @@ class Recording(db.Model):
     transcription = db.Column(db.Text)
     visit_notes = db.Column(db.Text)
     icd_codes = db.Column(LONGTEXT) 
-    status = db.Column(db.Enum(RecordingStatus), default=RecordingStatus.NOT_STARTED, index=True)
+    # status = db.Column(db.Enum(RecordingStatus), default=RecordingStatus.NOT_STARTED, index=True)
+    status = db.Column(db.String(20), nullable=True)
     
     # Foreign key to AssignedWorker model
     assigned_to = db.Column(db.Integer, db.ForeignKey('assigned_workers.assigned_id'), nullable=True)
