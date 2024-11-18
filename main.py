@@ -469,6 +469,7 @@ def get_recordings():
             's3_path': recording.s3_path,
             'icd_codes':recording.icd_codes,
             'transformed_file_name': recording.transformed_file_name,
+            'icd_codes':recording.icd_codes,
             'transcription': recording.transcription,
             'visit_notes': recording.visit_notes,
             'status': recording.status,
