@@ -28,7 +28,14 @@ class AssignedWorker(db.Model):
     def __repr__(self):
         return f"<AssignedWorker {self.assigned_id}, Max Assignments: {self.max_assignments}, Current Assignments: {self.current_assignments}>"
 
-# Updated Recording Model
+
+# Enum for recording status
+class RecordingStatus(Enum):
+    PROCESSED = "PROCESSED"
+    NOT_STARTED = "NOT_STARTED"
+    COMPLETE = "COMPLETE"
+
+
 class Recording(db.Model):
     __tablename__ = 'recordings'
     
@@ -38,7 +45,7 @@ class Recording(db.Model):
     transcription = db.Column(db.Text)
     visit_notes = db.Column(db.Text)
     icd_codes = db.Column(LONGTEXT) 
-    status = db.Column(db.String(50), default='unassigned', index=True)
+    status = db.Column(db.Enum(RecordingStatus), default=RecordingStatus.NOT_STARTED, index=True)
     
     # Foreign key to AssignedWorker model
     assigned_to = db.Column(db.Integer, db.ForeignKey('assigned_workers.assigned_id'), nullable=True)

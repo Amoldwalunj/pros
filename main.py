@@ -5,9 +5,12 @@ from dotenv import load_dotenv
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from flask_cors import cross_origin
-from models import db, Recording, AssignedWorker, User, UserRole
+from models import db, Recording, AssignedWorker, User, UserRole, RecordingStatus
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from flask_jwt_extended import JWTManager, create_access_token
 import requests
 import boto3
 import time
@@ -32,10 +35,18 @@ DB_USER = os.getenv('DB_USER')
 DB_PASSWORD = os.getenv('DB_PASSWORD')
 DB_NAME = os.getenv('DB_NAME')
 
-# Construct the database URI
-app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# DATABASE_URI
+DATABASE_URI = f'mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}'
 
+# Construct the database URI
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URI
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
+app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=30)
+
+jwt = JWTManager(app)
+engine = create_engine(DATABASE_URI)
+Session = sessionmaker(bind=engine)
 
 # Configure CORS for Flask - allow all origins for troubleshooting
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -70,12 +81,12 @@ def transform_name(name):
 
 def assign_reports_to_workers():
     with app.app_context():
-        # Find unassigned and unverified reports where assigned_to is NULL
-        unassigned_reports = Recording.query.filter_by(status='unassigned', validated=False, assigned_to=None).all()
+        # Find reports with status 'not started', unvalidated, and unassigned
+        unassigned_reports = Recording.query.filter_by(status=RecordingStatus.NOT_STARTED.value, validated=False, assigned_to=None).all()
         workers = User.query.filter_by(role=UserRole.WORKER).all()
         
         # Print the number of unassigned reports and workers
-        print(f"Found {len(unassigned_reports)} unassigned reports.")
+        print(f"Found {len(unassigned_reports)} reports not started.")
         print(f"Found {len(workers)} workers available.")
         
         # Calculate how many reports each worker should get
@@ -88,7 +99,7 @@ def assign_reports_to_workers():
         for index, report in enumerate(unassigned_reports):
             worker = workers[index % num_workers]  # Distribute reports cyclically among workers
             
-            # Print information about the worker and report being assigned
+            # Print information about the worker and report being assignedCOMPLETE
             print(f"Assigning report {report.recording_id} to worker {worker.first_name} {worker.last_name}.")
             
             # Check if the worker already has an assignment entry
@@ -104,7 +115,7 @@ def assign_reports_to_workers():
             # Ensure worker has capacity to take more assignments
             if assigned_worker and assigned_worker.current_assignments < assigned_worker.max_assignments:
                 print(f"Worker {worker.first_name} {worker.last_name} has capacity. Assigning report.")
-                report.status = 'assigned'
+                report.status = RecordingStatus.PROCESSED.value  # Update status to 'processed'
                 report.assigned_to = assigned_worker.assigned_id
                 assigned_worker.current_assignments += 1
                 db.session.commit()
@@ -119,11 +130,9 @@ scheduler.start()
 
 
 @app.route('/login', methods=['POST'])
-@cross_origin()
 def login():
     logger.info("Received login request.")
     
-    # Parse JSON data from the request
     if not request.json:
         logger.error("No JSON data provided in the request.")
         return jsonify({'error': 'Please provide login details in JSON format.'}), 400
@@ -132,26 +141,27 @@ def login():
     email = data.get('email')
     password = data.get('password')
 
-    # Check if email and password are provided
     if not email or not password:
         logger.error("Email or password is missing.")
         return jsonify({'error': 'Email and password are required.'}), 400
 
     try:
-        # Check if user exists
         user = User.query.filter_by(email=email).first()
         if not user:
             logger.error(f"No user found with email: {email}")
             return jsonify({'error': 'Invalid email or password.'}), 401
         
-        # Verify password (replace with actual hashed password verification in production)
-        if user.password != password:  # Replace with a secure password verification
+        if user.password != password:  # Assume plaintext for example; hash in production
             logger.error("Password verification failed.")
             return jsonify({'error': 'Invalid email or password.'}), 401
+
+        # Create JWT token
+        access_token = create_access_token(identity=email, expires_delta=timedelta(days=1))
 
         logger.info(f"User {user.email} logged in successfully.")
         return jsonify({
             'message': 'Login successful',
+            'access_token': access_token,
             'user': {
                 'id': user.user_id,
                 'email': user.email,
@@ -447,7 +457,8 @@ def get_recordings():
             query = query.join(AssignedWorker).join(User).filter(
                 (User.first_name + ' ' + User.last_name).ilike(f"%{assigned_worker}%")
             )
-
+    # Order the results by 'updated_at' in descending order
+    query = query.order_by(Recording.updated_at.desc())
     # Execute the query and fetch results
     recordings = query.all()
     # Convert results to JSON-serializable format
@@ -459,7 +470,7 @@ def get_recordings():
             'transcription': recording.transcription,
             'visit_notes': recording.visit_notes,
             'status': recording.status,
-            'assigned_to': recording.assigned_to,
+            'assigned_to': f"{recording.assigned_worker.worker_user.first_name} {recording.assigned_worker.worker_user.last_name}" if recording.assigned_worker and recording.assigned_worker.worker_user else None,
             'validated': recording.validated,
             'created_at': recording.created_at.isoformat(),
             'updated_at': recording.updated_at.isoformat()
@@ -545,6 +556,27 @@ def get_recording_counts():
     })
 
 
+@app.route('/recordings/<int:recording_id>', methods=['DELETE'])
+def delete_recording(recording_id):
+    session = Session()
+    try:
+        # Fetch the recording by ID
+        recording = session.query(Recording).filter(Recording.recording_id == recording_id).first()
+        if not recording:
+            # No recording found with the provided ID
+            return jsonify({'error': 'Recording not found'}), 404
+
+        # Delete the found recording
+        session.delete(recording)
+        session.commit()
+
+        # Return a success response
+        return jsonify({'success': 'Recording deleted successfully'}), 200
+    except Exception as e:
+        session.rollback()  # Ensure no partial changes are saved if an error occurs
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()  # Always close the session
 
 
 if __name__ == "__main__":
