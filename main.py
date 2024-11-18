@@ -580,6 +580,56 @@ def delete_recording(recording_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()  # Always close the session
+        
+
+@app.route('/recordings/<int:recording_id>/', methods=['PUT'])
+def update_recording(recording_id):
+    # Fetch the recording to update or return 404 if not found
+    recording = Recording.query.get(recording_id)
+    if recording is None:
+        return jsonify({'error': 'Invalid Recording ID.'}), 404
+
+    # Data from request body (assumed to be JSON)
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    # Update fields if provided in data
+    if 'transcription' in data:
+        recording.transcription = data['transcription']
+    if 'visit_notes' in data:
+        recording.visit_notes = data['visit_notes']
+    if 'icd_codes' in data:
+        recording.icd_codes = data['icd_codes']
+    if 'validated' in data:
+        recording.validated = bool(data['validated'])
+
+    # Update the 'updated_at' field to current UTC time
+    recording.updated_at = datetime.utcnow()
+
+    # Commit changes to the database
+    try:
+        db.session.commit()
+        return jsonify({
+            'status': 'success',
+            'message': 'Recording updated successfully.',
+            'data': {
+                'recording_id': recording.recording_id,
+                's3_path': recording.s3_path,
+                'transformed_file_name': recording.transformed_file_name,
+                'transcription': recording.transcription,
+                'visit_notes': recording.visit_notes,
+                'icd_codes': recording.icd_codes,
+                'status': recording.status,
+                'assigned_to': recording.assigned_to,
+                'validated': recording.validated,
+                'updated_at': recording.updated_at.isoformat()
+            }
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Unable to update recording', 'message': str(e)}), 500
+
 
 
 if __name__ == "__main__":
