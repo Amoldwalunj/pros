@@ -241,6 +241,7 @@ def upload_file():
             recording = Recording(
                 s3_path=s3_path,
                 transformed_file_name=transformed_filename,
+                status=RecordingStatus.NOT_STARTED.value,
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
@@ -466,6 +467,7 @@ def get_recordings():
         {
             'recording_id': recording.recording_id,
             's3_path': recording.s3_path,
+            'icd_codes':recording.icd_codes,
             'transformed_file_name': recording.transformed_file_name,
             'transcription': recording.transcription,
             'visit_notes': recording.visit_notes,
